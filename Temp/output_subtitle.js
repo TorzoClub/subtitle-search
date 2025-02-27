@@ -1,41 +1,62 @@
+const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
-const { exec } = require('child_process');
-const videoFolder = './video_res';  //获取视频目录
-
-//检测文件信息
-try {
+//筛选文件后缀
+function isSupportedFiles(videoPath){
+    const ext = path.extname(videoPath).toLowerCase();
+    return ['.mp4', '.mkv', '.mov', '.avi'].includes(ext);
+}
+//扫描目录
+function scanVideo(videoFolder) {
     const files = fs.readdirSync(videoFolder);
-    const videoFiles = files.filter(file => {
-        const ext = path.extname(file).toLowerCase();
-        return ['.mp4', '.mkv', 'avi', '.mov'].includes(ext);
-    })
+    const videoFiles = [];
 
-    videoFiles.forEach(videoFile => {
-            const inputFilePath = path.join(videoFolder,videoFile);
-            const probeCommand = `ffprobe -v error -select_streams s -show_entries stream=index,codec_name -of json "${inputFilePath}"`;
-            const probeOut = JSON.parse(execSync(probeCommand).toString());
-            //获取字幕详细
-    
-            if (!probeOut.streams || probeOut.streams.length === 0) {
-                    console.log(`视频${videoFile}未找到字幕`);
-            }   //确认是否存在字幕
-    
-            probeOut.streams.forEach((stream,index) => {
-                const outputFilePath = `./output/${videoFile}${index}.${stream.codec_name === 'subrip' ? 'srt' : 'ass'}`;
-                //定义输出路径名称及字幕格式后缀
-                
-                const command = `ffmpeg -v error -i "${inputFilePath}" -map 0:s:${index} -c:s ${stream.codec_name} -y "${outputFilePath}" -f ass -`;
-                //执行ffmpeg将字幕分离
-                try {
-                    const output = execSync(command).toString();
-                    console.log(`字幕已导出：${outputFilePath}，\n字幕内容：\n`,output,'字幕输出已完成');
-                } catch (err) {
-                    console.error("输出错误:",err)
-                }
-            });
-        });
-    } catch (error) {
-      console.error("路径读取错误：",error);
+    files.forEach( file => {
+        const videoPath = path.join(videoFolder, file);
+        const stat = fs.statSync(videoPath);
+
+        if(stat.isDirectory()) {
+            videoFiles.push(...scanVideo(videoPath));
+        } else {
+            if (isSupportedFiles(videoPath)) {
+                videoFiles.push(videoPath)
+            }
+        }
+    })
+    return videoFiles
+}
+//判断是否兼容字体格式
+function isSupportedSubtitle(codec_name) {
+    return ['subrip', 'ass'].includes(codec_name);
+}
+//查看视频信息
+function callFFprobe(inputFilePath) {
+    const ffprobe_cmd = `ffprobe -v error -select_streams s -show_entries stream=index,codec_name -of json "${inputFilePath}"`;
+    try {
+        return JSON.parse(execSync(ffprobe_cmd).toString());
+    } catch(err) {
+        throw new Error(`callFFprobe ${inputFilePath} failure`, { cause:err });
     }
+}
+//开始读取视频内嵌字幕
+function readSubtitleSync(inputFilePath) {
+    const ffprobeOut = callFFprobe(inputFilePath);
+    if(!ffprobeOut.streams || ffprobeOut.streams.lenght === 0) {
+        console.log(`视频未找到字幕`); 
+    } else {
+        return [
+            ...ffprobeOut.streams.map((stream,index) => {
+                try {
+                    const command = `ffmpeg -v error -i "${inputFilePath}" -map 0:s:${index} -c:s ass -f ass -`;
+                    return {
+                        stream_index: stream.index,
+                        codec_name: stream.codec_name,
+                        ass_raw: isSupportedSubtitle(stream.codec_name) ? execSync(command).toString() : null
+                    }
+                } catch(err) {
+                    throw new Error(`readSubtitleSync${inputFilePath}failure`, { cause: err})
+                }
+            })
+        ]
+    }
+}
